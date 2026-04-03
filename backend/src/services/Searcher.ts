@@ -1,13 +1,15 @@
 import { AxiosInstance, AxiosHeaders } from "axios";
 import { createAxiosInstance } from "../utils/axiosInstance";
-import GlobalSetting from "../models/GlobalSetting";
-import { GlobalSettingAttributes } from "../models/GlobalSetting";
 import * as cheerio from "cheerio";
 import { config } from "../config";
 import { logger } from "../utils/logger";
-import { injectable } from "inversify";
 
-interface sourceItem {
+interface CloudLinkItem {
+  cloudType: string;
+  link: string;
+}
+
+interface SourceItem {
   messageId?: string;
   title?: string;
   completeTitle?: string;
@@ -16,27 +18,40 @@ interface sourceItem {
   content?: string;
   description?: string;
   image?: string;
-  cloudLinks?: string[];
+  cloudLinks?: CloudLinkItem[];
   tags?: string[];
   cloudType?: string;
+  sourceName?: string;
+  articleUrl?: string;
 }
 
-@injectable()
+interface SearchGroup {
+  list: SourceItem[];
+  channelInfo: {
+    id?: string;
+    name: string;
+    channelLogo: string;
+  };
+  id: string;
+  supportsLoadMore?: boolean;
+}
+
 export class Searcher {
   private static instance: Searcher;
   private api: AxiosInstance | null = null;
+  private readonly leijingBaseUrl = "https://www.leijing2.com";
+  private readonly leijingMaxPosts = 8;
+  private readonly leijingRememberCookieHeader = [
+    "33ee0edee363cf05042563418af465a8__typecho_remember_author=cloud189-user",
+    "33ee0edee363cf05042563418af465a8__typecho_remember_mail=cloud189-user%40example.com",
+  ].join("; ");
 
   constructor() {
     this.initAxiosInstance();
     Searcher.instance = this;
   }
 
-  private async initAxiosInstance(isUpdate: boolean = false) {
-    let globalSetting = {} as GlobalSettingAttributes;
-    if (isUpdate) {
-      const settings = await GlobalSetting.findOne();
-      globalSetting = settings?.dataValues || ({} as GlobalSettingAttributes);
-    }
+  private initAxiosInstance() {
     this.api = createAxiosInstance(
       config.telegram.baseUrl,
       AxiosHeaders.from({
@@ -54,52 +69,65 @@ export class Searcher {
         "sec-fetch-user": "?1",
         "upgrade-insecure-requests": "1",
       }),
-      globalSetting?.isProxyEnabled,
-      globalSetting?.isProxyEnabled
-        ? { host: globalSetting?.httpProxyHost, port: globalSetting?.httpProxyPort }
-        : undefined
+      config.proxy.enabled,
+      config.proxy.enabled ? { host: config.proxy.host, port: config.proxy.port } : undefined
     );
   }
 
   public static async updateAxiosInstance(): Promise<void> {
-    await Searcher.instance.initAxiosInstance(true);
+    Searcher.instance.initAxiosInstance();
   }
 
-  private extractCloudLinks(text: string): { links: string[]; cloudType: string } {
-    const links: string[] = [];
+  private extractCloudLinks(text: string): { links: CloudLinkItem[]; cloudType: string } {
+    const links = new Map<string, CloudLinkItem>();
     let cloudType = "";
-    Object.values(config.cloudPatterns).forEach((pattern, index) => {
+    Object.entries(config.cloudPatterns).forEach(([type, pattern]) => {
       const matches = text.match(pattern);
       if (matches) {
-        links.push(...matches);
-        if (!cloudType) cloudType = Object.keys(config.cloudPatterns)[index];
+        matches.forEach((link) => {
+          links.set(link, {
+            cloudType: type,
+            link,
+          });
+        });
+        if (!cloudType) {
+          cloudType = type;
+        }
       }
     });
     return {
-      links: [...new Set(links)],
+      links: Array.from(links.values()),
       cloudType,
     };
   }
 
   async searchAll(keyword: string, channelId?: string, messageId?: string) {
-    const allResults: any[] = [];
+    const allResults: SearchGroup[] = [];
+    const isLeijingOnly = channelId === "leijing2";
 
-    const channelList: any[] = channelId
+    const channelList: any[] = isLeijingOnly
+      ? []
+      : channelId
       ? config.telegram.channels.filter((channel: any) => channel.id === channelId)
       : config.telegram.channels;
 
-    // 使用Promise.all进行并行请求
+    if (channelList.length === 0 && !isLeijingOnly && channelId) {
+      return {
+        data: [],
+      };
+    }
+
     const searchPromises = channelList.map(async (channel) => {
       try {
         const messageIdparams = messageId ? `before=${messageId}` : "";
         const url = `/${channel.id}${keyword ? `?q=${encodeURIComponent(keyword)}&${messageIdparams}` : `?${messageIdparams}`}`;
-        console.log(`Searching in channel ${channel.name} with URL: ${url}`);
+        logger.info(`Searching in channel ${channel.name} with URL: ${url}`);
         return this.searchInWeb(url).then((results) => {
-          console.log(`Found ${results.items.length} items in channel ${channel.name}`);
+          logger.info(`Found ${results.items.length} items in channel ${channel.name}`);
           if (results.items.length > 0) {
             const channelResults = results.items
-              .filter((item: sourceItem) => item.cloudLinks && item.cloudLinks.length > 0)
-              .map((item: sourceItem) => ({
+              .filter((item: SourceItem) => item.cloudLinks && item.cloudLinks.length > 0)
+              .map((item: SourceItem) => ({
                 ...item,
                 channel: channel.name,
                 channelId: channel.id,
@@ -120,8 +148,18 @@ export class Searcher {
       }
     });
 
-    // 等待所有请求完成
     await Promise.all(searchPromises);
+
+    if (!messageId && (!channelId || isLeijingOnly)) {
+      try {
+        const leijingGroup = await this.searchLeijing(keyword);
+        if (leijingGroup.list.length > 0) {
+          allResults.push(leijingGroup);
+        }
+      } catch (error) {
+        logger.error("搜索雷鲸小站失败:", error);
+      }
+    }
 
     return {
       data: allResults,
@@ -136,7 +174,7 @@ export class Searcher {
       const response = await this.api.get(url);
       const html = response.data;
       const $ = cheerio.load(html);
-      const items: sourceItem[] = [];
+      const items: SourceItem[] = [];
       let channelLogo = "";
       $(".tgme_header_link").each((_, element) => {
         channelLogo = $(element).find("img").attr("src") || "";
@@ -145,14 +183,12 @@ export class Searcher {
       $(".tgme_widget_message_wrap").each((_, element) => {
         const messageEl = $(element);
 
-        // 通过 data-post 属性来获取消息的链接 去除channelId 获得消息id
         const messageId = messageEl
           .find(".tgme_widget_message")
           .data("post")
           ?.toString()
           .split("/")[1];
 
-        // 提取标题 (第一个<br>标签前的内容)
         const title =
           messageEl
             .find(".js-message_text")
@@ -161,7 +197,6 @@ export class Searcher {
             .replace(/<[^>]+>/g, "")
             .replace(/\n/g, "") || "";
 
-        // 提取描述 (第一个<a>标签前面的内容，不包含标题)
         const content =
           messageEl
             .find(".js-message_text")
@@ -171,20 +206,14 @@ export class Searcher {
             .replace(/<br>/g, "")
             .trim() || "";
 
-        // 提取链接 (消息中的链接)
-        // const link = messageEl.find('.tgme_widget_message').data('post');
-
-        // 提取发布时间
         const pubDate = messageEl.find("time").attr("datetime");
 
-        // 提取图片
         const image = messageEl
           .find(".tgme_widget_message_photo_wrap")
           .attr("style")
           ?.match(/url\('(.+?)'\)/)?.[1];
 
         const tags: string[] = [];
-        // 提取云盘链接
         const links = messageEl
           .find(".tgme_widget_message_text a")
           .map((_, el) => $(el).attr("href"))
@@ -196,7 +225,6 @@ export class Searcher {
           }
         });
         const cloudInfo = this.extractCloudLinks(links.join(" "));
-        // 添加到数组第一位
         items.unshift({
           messageId,
           title,
@@ -216,6 +244,159 @@ export class Searcher {
         channelLogo: "",
       };
     }
+  }
+
+  private async searchLeijing(keyword: string): Promise<SearchGroup> {
+    const html = await this.fetchLeijingSearchPage(keyword);
+    const posts = this.parseLeijingPosts(html).slice(0, this.leijingMaxPosts);
+    const list: SourceItem[] = [];
+
+    const detailResults = await Promise.allSettled(
+      posts.map(async (post) => this.resolveLeijingPost(post))
+    );
+
+    detailResults.forEach((result) => {
+      if (result.status === "fulfilled" && result.value) {
+        list.push(result.value);
+      }
+    });
+
+    return {
+      id: "leijing2",
+      supportsLoadMore: false,
+      channelInfo: {
+        id: "leijing2",
+        name: "雷鲸小站",
+        channelLogo: "",
+      },
+      list,
+    };
+  }
+
+  private async fetchLeijingSearchPage(keyword: string): Promise<string> {
+    const url = `${this.leijingBaseUrl}/index.php/search/${encodeURIComponent(keyword)}/`;
+    const response = await this.api?.get(url, {
+      baseURL: undefined,
+      headers: {
+        "User-Agent": "Mozilla/5.0",
+      },
+    });
+    return String(response?.data || "");
+  }
+
+  private async fetchLeijingArticlePage(url: string): Promise<string> {
+    const response = await this.api?.get(url, {
+      baseURL: undefined,
+      headers: {
+        "User-Agent": "Mozilla/5.0",
+        Cookie: this.leijingRememberCookieHeader,
+      },
+    });
+    return String(response?.data || "");
+  }
+
+  private parseLeijingPosts(html: string): Array<{ id: string; title: string; url: string; abstract: string }> {
+    const posts: Array<{ id: string; title: string; url: string; abstract: string }> = [];
+    const pattern =
+      /<a href="([^"]+\/archives\/(\d+)\/)" class="title" title="([^"]+)">[\s\S]*?<a class="abstract" href="[^"]+" title="文章摘要">([\s\S]*?)<\/a>/g;
+
+    for (const match of html.matchAll(pattern)) {
+      posts.push({
+        id: match[2],
+        title: this.decodeHtml(match[3]).trim(),
+        url: new URL(match[1], this.leijingBaseUrl).toString(),
+        abstract: this.stripTags(this.decodeHtml(match[4])).trim(),
+      });
+    }
+    return posts;
+  }
+
+  private async resolveLeijingPost(post: {
+    id: string;
+    title: string;
+    url: string;
+    abstract: string;
+  }): Promise<SourceItem | null> {
+    const linkSet = new Map<string, CloudLinkItem>();
+
+    this.extractLeijingShareLinks(post.abstract).forEach((link) => {
+      linkSet.set(link, { cloudType: "tianyi", link });
+    });
+
+    try {
+      const html = await this.fetchLeijingArticlePage(post.url);
+      const content = this.extractLeijingArticleContent(html);
+      this.extractLeijingShareLinks(content).forEach((link) => {
+        linkSet.set(link, { cloudType: "tianyi", link });
+      });
+    } catch (error) {
+      logger.warn(`抓取雷鲸文章失败: ${post.url}`);
+    }
+
+    const cloudLinks = Array.from(linkSet.values());
+    if (!cloudLinks.length) {
+      return null;
+    }
+
+    return {
+      messageId: `leijing-${post.id}`,
+      title: post.title,
+      completeTitle: post.title,
+      pubDate: "",
+      content: "来自雷鲸小站的帖子分享链接",
+      cloudLinks,
+      cloudType: "tianyi",
+      tags: ["#雷鲸小站"],
+      sourceName: "雷鲸小站",
+      articleUrl: post.url,
+    };
+  }
+
+  private extractLeijingArticleContent(html: string): string {
+    const match = html.match(/<article class="joe_detail__article"[^>]*>([\s\S]*?)<\/article>/);
+    return match ? match[1] : html;
+  }
+
+  private extractLeijingShareLinks(content: string): string[] {
+    const patterns = [
+      /https?:\/\/content\.21cn\.com[^\s"'<>（）()]+/g,
+      /https?:\/\/cloud\.189\.cn\/web\/share\?[^\s"'<>（）()]+/g,
+      /https?:\/\/cloud\.189\.cn\/t\/[A-Za-z0-9]+/g,
+      /https?:\/\/h5\.cloud\.189\.cn\/share\.html#\/t\/[A-Za-z0-9]+/g,
+    ];
+    const normalizedContent = this.decodeHtml(content);
+    const result = new Set<string>();
+
+    patterns.forEach((pattern) => {
+      const matches = normalizedContent.match(pattern) || [];
+      matches.forEach((match) => {
+        const cleaned = match.replace(/[（(].*$/g, "").replace(/[，。；、）》>\]]+$/g, "").trim();
+        if (cleaned) {
+          result.add(cleaned);
+        }
+      });
+    });
+
+    return Array.from(result);
+  }
+
+  private stripTags(value: string): string {
+    return value
+      .replace(/<[^>]*>/g, " ")
+      .replace(/\s+/g, " ")
+      .trim();
+  }
+
+  private decodeHtml(value: string): string {
+    return value
+      .replace(/&quot;/g, '"')
+      .replace(/&#39;/g, "'")
+      .replace(/&amp;/g, "&")
+      .replace(/&lt;/g, "<")
+      .replace(/&gt;/g, ">")
+      .replace(/&nbsp;/g, " ")
+      .replace(/&#(\d+);/g, (_, code) => String.fromCharCode(Number(code)))
+      .replace(/&#x([0-9a-f]+);/gi, (_, code) => String.fromCharCode(parseInt(code, 16)));
   }
 }
 

@@ -1,19 +1,9 @@
 import axios, { AxiosResponse, AxiosRequestConfig } from "axios";
 import { ElMessage } from "element-plus";
-import { isMobileDevice } from "@/utils/index";
-import { showNotify } from "vant";
 import { RequestResult } from "../types/response";
 import { STORAGE_KEYS } from "@/constants/storage";
 
 const errorMessage = (message: string) => {
-  if (isMobileDevice()) {
-    console.log(message);
-    showNotify({
-      type: "danger",
-      message,
-    });
-    return;
-  }
   ElMessage.error(message);
 };
 

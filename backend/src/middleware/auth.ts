@@ -1,7 +1,7 @@
 // filepath: /D:/code/CloudDiskDown/backend/src/middleware/auth.ts
 import { Request, Response, NextFunction } from "express";
 import jwt, { JwtPayload } from "jsonwebtoken";
-import User from "../models/User";
+import { ApiResponse } from "../core/ApiResponse";
 import { config } from "../config";
 
 interface AuthenticatedRequest extends Request {
@@ -16,28 +16,24 @@ export const authMiddleware = async (
   res: Response,
   next: NextFunction
 ): Promise<void | Response> => {
-  if (req.path === "/user/login" || req.path === "/user/register" || req.path === "/tele-images/") {
+  if (req.path.endsWith("/user/login") || req.path.endsWith("/health")) {
     return next();
   }
 
   const token = req.headers.authorization?.split(" ")[1];
   if (!token) {
-    return res.status(401).json({ message: "未提供 token" });
+    return res.status(401).json(ApiResponse.error("未提供 token", 401));
   }
 
   try {
     const decoded = jwt.verify(token, config.jwtSecret) as JwtPayload;
 
     req.user = {
-      userId: decoded.userId,
-      role: decoded.role,
+      userId: String(decoded.userId || ""),
+      role: Number(decoded.role || 0),
     };
-    const user = await User.findOne({ where: { userId: decoded.userId } });
-    if (!user) {
-      return res.status(401).json({ message: "无效的 token" });
-    }
     next();
   } catch (error) {
-    res.status(401).json({ message: "无效的 token" });
+    res.status(401).json(ApiResponse.error("无效的 token", 401));
   }
 };

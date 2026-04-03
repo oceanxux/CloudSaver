@@ -1,16 +1,6 @@
 import { defineStore } from "pinia";
-import { cloud115Api } from "@/api/cloud115";
 import { resourceApi } from "@/api/resource";
-import { quarkApi } from "@/api/quark";
-import type {
-  Resource,
-  ShareInfoResponse,
-  ShareInfo,
-  ResourceItem,
-  GetShareInfoParams,
-  SaveFileParams,
-  ShareFileInfoAndFolder,
-} from "@/types";
+import type { Resource, ShareInfoResponse, ShareInfo, ResourceItem } from "@/types";
 import { ElMessage } from "element-plus";
 
 interface StorageListObject {
@@ -24,65 +14,36 @@ const lastResource = (
     : { list: [] }
 ) as StorageListObject;
 
-// 定义云盘驱动配置类型
-interface CloudDriveConfig {
-  name: string;
-  type: string;
-  regex: RegExp;
-  api: {
-    getShareInfo: (params: GetShareInfoParams) => Promise<ShareInfoResponse>;
-    saveFile: (params: SaveFileParams) => Promise<{ code: number; message?: string }>;
-  };
-  parseShareCode: (match: RegExpMatchArray) => GetShareInfoParams;
-  getSaveParams: (shareInfoAndFolder: ShareFileInfoAndFolder) => SaveFileParams;
+interface RawCloudLinkItem {
+  link?: string;
 }
 
-// 云盘类型配置
-export const CLOUD_DRIVES: CloudDriveConfig[] = [
-  {
-    name: "115网盘",
-    type: "pan115",
-    regex: /(?:115|anxia|115cdn)\.com\/s\/([^?]+)(?:\?password=([^&#]+))?/,
-    api: {
-      getShareInfo: (params: GetShareInfoParams) => cloud115Api.getShareInfo(params),
-      saveFile: async (params: SaveFileParams) => {
-        return await cloud115Api.saveFile(params);
-      },
-    },
-    parseShareCode: (match: RegExpMatchArray) => ({
-      shareCode: match[1],
-      receiveCode: match[2] || "",
-    }),
-    getSaveParams: (shareInfoAndFolder: ShareFileInfoAndFolder) => ({
-      shareCode: shareInfoAndFolder.shareCode || "",
-      receiveCode: shareInfoAndFolder.receiveCode || "",
-      fileId: shareInfoAndFolder.shareInfo.list[0].fileId,
-      folderId: shareInfoAndFolder.folderId,
-      fids: shareInfoAndFolder.shareInfo.list.map((item: { fileId?: string }) => item.fileId || ""),
-    }),
-  },
-  {
-    name: "夸克网盘",
-    type: "quark",
-    regex: /pan\.quark\.cn\/s\/([a-zA-Z0-9]+)/,
-    api: {
-      getShareInfo: (params) => quarkApi.getShareInfo(params),
-      saveFile: async (params: SaveFileParams) => {
-        return await quarkApi.saveFile(params);
-      },
-    },
-    parseShareCode: (match: RegExpMatchArray) => ({ shareCode: match[1] }),
-    getSaveParams: (shareInfoAndFolder: ShareFileInfoAndFolder) => ({
-      fids: shareInfoAndFolder.shareInfo.list.map((item: { fileId?: string }) => item.fileId || ""),
-      fidTokens: shareInfoAndFolder.shareInfo.list.map(
-        (item: { fileIdToken?: string }) => item.fileIdToken || ""
-      ),
-      folderId: shareInfoAndFolder.folderId,
-      shareCode: shareInfoAndFolder.shareInfo.pwdId || "",
-      receiveCode: shareInfoAndFolder.shareInfo.stoken || "",
-    }),
-  },
-];
+interface RawResourceItem extends Omit<ResourceItem, "cloudLinks"> {
+  cloudLinks: Array<string | RawCloudLinkItem>;
+}
+
+interface RawResourceGroup extends Omit<Resource, "list"> {
+  list: RawResourceItem[];
+}
+
+const normalizeCloudLinks = (cloudLinks: Array<string | RawCloudLinkItem> = []): string[] => {
+  return cloudLinks
+    .map((item) => (typeof item === "string" ? item : item.link || ""))
+    .filter((item): item is string => Boolean(item));
+};
+
+const normalizeResources = (data: RawResourceGroup[] = []): Resource[] => {
+  return data
+    .filter((item) => item.list.length > 0)
+    .map((group) => ({
+      ...group,
+      list: group.list.map((item) => ({
+        ...item,
+        cloudLinks: normalizeCloudLinks(item.cloudLinks),
+        isSupportSave: false,
+      })),
+    }));
+};
 
 export const useResourceStore = defineStore("resource", {
   state: () => ({
@@ -107,7 +68,6 @@ export const useResourceStore = defineStore("resource", {
     setLoadTree(loadTree: boolean) {
       this.loadTree = loadTree;
     },
-    // 搜索资源
     async searchResources(keyword?: string, isLoadMore = false, channelId?: string): Promise<void> {
       this.loading = true;
       if (!isLoadMore) this.resources = [];
@@ -126,18 +86,9 @@ export const useResourceStore = defineStore("resource", {
           }
           keyword = this.keyword;
         }
-        let { data = [] } = await resourceApi.search(keyword || "", channelId, lastMessageId);
+        const response = await resourceApi.search(keyword || "", channelId, lastMessageId);
+        let data = normalizeResources((response.data as RawResourceGroup[] | undefined) || []);
         this.keyword = keyword || "";
-        data = data
-          .filter((item) => item.list.length > 0)
-          .map((x) => ({
-            ...x,
-            list: x.list.map((item) => ({
-              ...item,
-              isSupportSave: CLOUD_DRIVES.some((drive) => drive.regex.test(item.cloudLinks[0])),
-            })),
-          }));
-        console.log(data);
         if (isLoadMore) {
           const findedIndex = this.resources.findIndex((item) => item.id === data[0]?.id);
           if (findedIndex !== -1) {
@@ -163,142 +114,30 @@ export const useResourceStore = defineStore("resource", {
           }
         }
       } catch (error) {
-        console.log(error);
-        this.handleError("搜索失败，请重试", null);
+        this.handleError("搜索失败，请重试", error);
       } finally {
         this.loading = false;
       }
     },
 
-    // 设置选择资源
     async setSelectedResource(resourceSelect: ShareInfo[]) {
       this.resourceSelect = resourceSelect;
     },
 
-    // 转存资源
-    async saveResource(resource: ResourceItem, folderId: string): Promise<void> {
-      const savePromises: Promise<void>[] = [];
-      CLOUD_DRIVES.forEach((drive) => {
-        if (resource.cloudLinks.some((link) => drive.regex.test(link))) {
-          savePromises.push(this.saveResourceToDrive(resource, folderId, drive));
-        }
-      });
-      await Promise.all(savePromises);
+    async saveResource(_resource: ResourceItem, _folderId: string): Promise<void> {
+      ElMessage.warning("当前版本仅保留资源搜索功能");
     },
 
-    // 保存资源到网盘
-    async saveResourceToDrive(
-      resource: ResourceItem,
-      folderId: string,
-      drive: CloudDriveConfig
-    ): Promise<void> {
-      const link = resource.cloudLinks.find((link) => drive.regex.test(link));
-      if (!link) return;
-
-      const match = link.match(drive.regex);
-      if (!match) throw new Error("链接解析失败");
-      const parsedCode = drive.parseShareCode(match);
-
-      const shareInfo = {
-        ...this.shareInfo,
-        list: this.resourceSelect.filter((x) => x.isChecked),
-      };
-      console.log(shareInfo);
-
-      const params = drive.getSaveParams({
-        shareInfo,
-        ...parsedCode,
-        folderId,
-      });
-      const result = await drive.api.saveFile(params);
-
-      if (result.code === 0) {
-        ElMessage.success(`${drive.name} 转存成功`);
-      } else {
-        ElMessage.error(result.message);
-      }
+    async parsingCloudLink(_url: string): Promise<void> {
+      ElMessage.warning("当前版本仅保留资源搜索功能");
     },
 
-    // 解析云盘链接
-    async parsingCloudLink(url: string): Promise<void> {
-      this.loading = true;
-      this.resources = [];
-      try {
-        const matchedDrive = CLOUD_DRIVES.find((drive) => drive.regex.test(url));
-        if (!matchedDrive) throw new Error("不支持的网盘链接");
-
-        const match = url.match(matchedDrive.regex);
-        if (!match) throw new Error("链接解析失败");
-
-        const parsedCode = matchedDrive.parseShareCode(match);
-        const shareInfo = await matchedDrive.api.getShareInfo(parsedCode);
-        if (shareInfo?.list?.length) {
-          this.resources = [
-            {
-              id: "",
-              channelInfo: {
-                name: "自定义搜索",
-                channelLogo: "",
-                channelId: "",
-              },
-              displayList: true,
-              list: [
-                {
-                  id: "1",
-                  title: shareInfo.list.map((item) => item.fileName).join(", "),
-                  cloudLinks: [url],
-                  cloudType: matchedDrive.type,
-                  channel: matchedDrive.name,
-                  pubDate: "",
-                  isSupportSave: true,
-                },
-              ],
-            },
-          ];
-        } else {
-          throw new Error("解析失败，请检查链接是否正确");
-        }
-      } catch (error) {
-        this.handleError("解析失败，请重试", error);
-      } finally {
-        this.loading = false;
-      }
-    },
-
-    // 获取资源列表并选择
-    async getResourceListAndSelect(resource: ResourceItem): Promise<boolean> {
+    async getResourceListAndSelect(_resource: ResourceItem): Promise<boolean> {
       this.setSelectedResource([]);
-      const { cloudType } = resource;
-      const drive = CLOUD_DRIVES.find((x) => x.type === cloudType);
-      if (!drive) {
-        return false;
-      }
-      const link = resource.cloudLinks.find((link) => drive.regex.test(link));
-      if (!link) return false;
-
-      const match = link.match(drive.regex);
-      if (!match) throw new Error("链接解析失败");
-
-      const parsedCode = drive.parseShareCode(match);
-      this.setLoadTree(true);
-      let shareInfo = await drive.api.getShareInfo(parsedCode);
-      console.log(shareInfo);
-      this.setLoadTree(false);
-      if (shareInfo) {
-        shareInfo = {
-          ...shareInfo,
-          ...parsedCode,
-        };
-        this.shareInfo = shareInfo;
-        this.setSelectedResource(this.shareInfo.list.map((x) => ({ ...x, isChecked: true })));
-        return true;
-      } else {
-        ElMessage.error("获取资源信息失败,请先检查cookie!");
-        return false;
-      }
+      ElMessage.warning("当前版本仅保留资源搜索功能");
+      return false;
     },
 
-    // 统一错误处理
     handleError(message: string, error: unknown): void {
       console.error(message, error);
       ElMessage.error(error instanceof Error ? error.message : message);

@@ -1,54 +1,11 @@
 import { defineConfig } from "vite";
 import vue from "@vitejs/plugin-vue";
 import { fileURLToPath, URL } from "node:url";
-import AutoImport from "unplugin-auto-import/vite";
-import Components from "unplugin-vue-components/vite";
-import { ElementPlusResolver } from "unplugin-vue-components/resolvers";
-import { VantResolver } from "@vant/auto-import-resolver";
-import { VitePWA } from "vite-plugin-pwa";
 import { resolve } from "path";
 
 export default defineConfig({
   base: "/",
-  plugins: [
-    vue(),
-    VitePWA({
-      registerType: "autoUpdate",
-      includeAssets: ["logo-1.png", "logo.svg"],
-      injectRegister: "auto",
-      workbox: {
-        globPatterns: ["**/*.{js,css,html,png,svg}"],
-      },
-      manifest: {
-        name: "CloudSaver",
-        short_name: "CloudSaver",
-        description: "网盘资源搜索工具",
-        theme_color: "#ffffff",
-        background_color: "#ffffff",
-        display: "standalone",
-        scope: "/",
-        start_url: "/",
-        icons: [
-          {
-            src: "logo-1.png",
-            sizes: "192x192",
-            type: "image/png",
-          },
-          {
-            src: "logo.svg",
-            sizes: "192x192",
-            type: "image/svg+xml",
-          },
-        ],
-      },
-    }),
-    AutoImport({
-      resolvers: [ElementPlusResolver(), VantResolver()],
-    }),
-    Components({
-      resolvers: [ElementPlusResolver(), VantResolver()],
-    }),
-  ],
+  plugins: [vue()],
   css: {
     preprocessorOptions: {
       scss: {

@@ -1,13 +1,13 @@
 #!/bin/sh
+set -e
 
-# 如果配置目录下没有 env 文件，则复制示例文件
 if [ ! -f /app/config/env ]; then
-    cp /app/.env.example /app/config/env
+    cp /app/backend/.env.example /app/config/env
     echo "已创建默认配置文件 /app/config/env，请根据需要修改配置"
 fi
 
-# 创建配置文件软链接
-ln -sf /app/config/env /app/.env
+ln -sf /app/config/env /app/backend/.env
 
-# 启动 Nginx 和后端服务
-nginx -g 'daemon off;' & npm run start 
+cd /app/backend
+nginx
+exec npm run start
