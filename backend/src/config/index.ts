@@ -33,6 +33,12 @@ interface Config {
     host: string;
     port: number;
   };
+  hdhive: {
+    enabled: boolean;
+    apiKey: string;
+    tmdbSearchLimit: number;
+    resourceLimit: number;
+  };
 
   cloudPatterns: CloudPatterns;
   app: {
@@ -103,6 +109,12 @@ export const config: Config = {
     enabled: process.env.PROXY_ENABLED === "true",
     host: process.env.HTTP_PROXY_HOST || "",
     port: parseInt(process.env.HTTP_PROXY_PORT || "0"),
+  },
+  hdhive: {
+    enabled: process.env.HDHIVE_ENABLED !== "false",
+    apiKey: process.env.HDHIVE_API_KEY || "",
+    tmdbSearchLimit: parseInt(process.env.HDHIVE_TMDB_SEARCH_LIMIT || "5"),
+    resourceLimit: parseInt(process.env.HDHIVE_RESOURCE_LIMIT || "3"),
   },
   cloudPatterns: {
     baiduPan: /https?:\/\/(?:pan|yun)\.baidu\.com\/[^\s<>"]+/g,
