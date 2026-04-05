@@ -5,7 +5,7 @@
 这个版本只保留两件事：
 
 1. `POST /api/user/login` 登录拿 token
-2. `GET /api/search` 搜索 Telegram 频道与雷鲸小站资源
+2. `GET /api/search` 搜索 Telegram 频道、雷鲸小站与天翼搜资源
 
 其余转存、设置、豆瓣、赞助页等功能都不再作为运行链路的一部分。
 
@@ -32,6 +32,13 @@ TELE_CHANNELS=[{"id":"xxx","name":"频道名"}]
 PROXY_ENABLED=false
 HTTP_PROXY_HOST=127.0.0.1
 HTTP_PROXY_PORT=7890
+TIANYISO_COOKIE=
+TIANYISO_USER_AGENT=
+TIANYISO_SOLVER_URL=
+TIANYISO_SOLVER_SESSION=
+TIANYISO_SOLVER_TIMEOUT_MS=120000
+TIANYISO_SOLVER_WAIT_SECONDS=2
+TIANYISO_SOLVER_TABS_TILL_VERIFY=0
 ```
 
 说明：
@@ -42,6 +49,10 @@ HTTP_PROXY_PORT=7890
   `tianyirigeng`、`cloudtianyi`、`tyypzhpd`、`tianyiDrive`、`tianyifc`、`tianyiyunpanpindao`、`yunpan189`
 - 如果服务器访问 Telegram 需要代理，再打开 `PROXY_ENABLED`
 - 雷鲸小站搜索当前内置启用，结果会以单独分组 `雷鲸小站` 返回
+- 天翼搜搜索当前内置启用，会先抓取 `https://www.tianyiso.com/search?k=关键词`，再按关键词做二次过滤，结果以单独分组 `天翼搜` 返回
+- 如果天翼搜返回 Cloudflare `Just a moment...` / `Performing security verification`：
+  - 可把浏览器里拿到的 `cf_clearance` 等 cookie 填到 `TIANYISO_COOKIE`
+  - 或配置 FlareSolverr / FlareBypasser 兼容的 `/v1` 接口到 `TIANYISO_SOLVER_URL`
 
 ## 本地运行
 
@@ -81,7 +92,7 @@ GET /api/health
 
 ## 返回数据说明
 
-`/api/search` 返回分组结果，Telegram 频道和雷鲸小站都会遵循相同的 `cloudLinks` 结构：
+`/api/search` 返回分组结果，Telegram 频道、雷鲸小站和天翼搜都会遵循相同的 `cloudLinks` 结构：
 
 ```json
 [
