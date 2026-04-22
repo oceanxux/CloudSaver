@@ -1,51 +1,148 @@
-name: GHCR Docker Image CI/CD
+name: Auto Release Docker Image
+
 on:
   push:
-    tags: ["v*.*.*"] # 支持标签触发（如 v1.0.0）
-  workflow_dispatch: # 支持手动触发
+    branches:
+      - master
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  packages: write
+
+concurrency:
+  group: auto-release-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
-  build-and-push:
+  build-and-release:
     runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      packages: write 
-    env:
-      REPO_NAME: ${{ github.repository }}
+
     steps:
-      - name: 检出代码
-        uses: actions/checkout@v4
+      - name: Checkout code
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          submodules: true
 
-      - name: 设置小写镜像名称和版本
+      - name: Guard release conditions
+        id: guard
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          ACTOR: ${{ github.actor }}
+          HEAD_COMMIT_MESSAGE: ${{ github.event.head_commit.message }}
+          CURRENT_SHA: ${{ github.sha }}
         run: |
-          LOWER_NAME=$(echo "$REPO_NAME" | tr '[:upper:]' '[:lower:]')
-          echo "LOWER_NAME=$LOWER_NAME" >> $GITHUB_ENV
-          
-          if [[ $GITHUB_REF == refs/tags/* ]]; then
-            VERSION=${GITHUB_REF#refs/tags/v}
-          else
-            VERSION=manual-${GITHUB_SHA::7}
-          fi
-          echo "VERSION=$VERSION" >> $GITHUB_ENV
+          should_publish=true
+          reason="ready"
 
-      - name: 登录到 GitHub Container Registry (GHCR)
+          if [ "$ACTOR" = "github-actions[bot]" ]; then
+            should_publish=false
+            reason="skip bot trigger"
+          elif printf '%s' "$HEAD_COMMIT_MESSAGE" | grep -Fq '[skip release]'; then
+            should_publish=false
+            reason="skip release commit"
+          fi
+
+          if [ "$should_publish" = true ] && [ "$EVENT_NAME" = "push" ]; then
+            git fetch origin master --tags
+            latest_sha=$(git rev-parse origin/master)
+            if [ "$latest_sha" != "$CURRENT_SHA" ]; then
+              should_publish=false
+              reason="outdated commit"
+            fi
+          fi
+
+          echo "should_publish=$should_publish" >> "$GITHUB_OUTPUT"
+          echo "reason=$reason" >> "$GITHUB_OUTPUT"
+
+      - name: Skip release
+        if: steps.guard.outputs.should_publish != 'true'
+        run: |
+          echo "Skipping auto release: ${{ steps.guard.outputs.reason }}"
+
+      - name: Set up Node.js
+        if: steps.guard.outputs.should_publish == 'true'
+        uses: actions/setup-node@v6
+        with:
+          node-version: 20
+
+      - name: Bump patch version
+        if: steps.guard.outputs.should_publish == 'true'
+        id: version
+        run: |
+          current_version=$(node -p "require('./package.json').version")
+          IFS='.' read -r major minor patch <<< "$current_version"
+
+          while true; do
+            patch=$((patch + 1))
+            candidate_version="${major}.${minor}.${patch}"
+            candidate_tag="v${candidate_version}"
+            if ! git rev-parse -q --verify "refs/tags/${candidate_tag}" >/dev/null; then
+              npm version "${candidate_version}" --no-git-tag-version
+              new_version="${candidate_version}"
+              break
+            fi
+          done
+
+          echo "version=$new_version" >> "$GITHUB_OUTPUT"
+          echo "tag=v$new_version" >> "$GITHUB_OUTPUT"
+
+      - name: Commit version and push tag
+        if: steps.guard.outputs.should_publish == 'true'
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          TAG: ${{ steps.version.outputs.tag }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add package.json package-lock.json
+          git commit -m "chore(release): ${TAG} [skip release]"
+          git tag "${TAG}"
+          git push origin HEAD:master
+          git push origin "${TAG}"
+
+      - name: Set up QEMU
+        if: steps.guard.outputs.should_publish == 'true'
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        if: steps.guard.outputs.should_publish == 'true'
+        uses: docker/setup-buildx-action@v3
+
+      - name: Prepare image name
+        if: steps.guard.outputs.should_publish == 'true'
+        id: prep
+        run: echo "image=ghcr.io/${GITHUB_REPOSITORY,,}" >> "$GITHUB_OUTPUT"
+
+      - name: Login to GitHub Container Registry
+        if: steps.guard.outputs.should_publish == 'true'
         uses: docker/login-action@v3
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }} 
+          password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: 设置 QEMU 支持多架构
-        uses: docker/setup-qemu-action@v3
-
-      - name: 设置 Docker Buildx
-        uses: docker/setup-buildx-action@v3
-
-      - name: 构建并推送 Docker 镜像
-        uses: docker/build-push-action@v5
+      - name: Build and push Docker images
+        if: steps.guard.outputs.should_publish == 'true'
+        uses: docker/build-push-action@v6
         with:
           context: .
-          platforms: linux/amd64,linux/arm64 
           push: true
+          provenance: false
+          platforms: linux/amd64,linux/arm64
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
           tags: |
-            ghcr.io/${{ env.LOWER_NAME }}:latest
-            ghcr.io/${{ env.LOWER_NAME }}:${{ env.VERSION }}
+            ${{ steps.prep.outputs.image }}:${{ steps.version.outputs.version }}
+            ${{ steps.prep.outputs.image }}:latest
+
+      - name: Create GitHub Release
+        if: steps.guard.outputs.should_publish == 'true'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.version.outputs.tag }}
+          name: ${{ steps.version.outputs.tag }}
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
