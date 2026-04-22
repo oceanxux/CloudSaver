@@ -38,6 +38,18 @@ HDHIVE_TMDB_SEARCH_LIMIT=5
 HDHIVE_RESOURCE_LIMIT=3
 ```
 
+```docker-compose.yml
+services:
+  cloudsaver:
+    image: ghcr.io/oceanxux/cloudsaver:latest
+    container_name: cloud-saver
+    ports:
+      - "7890:8008"
+    volumes:
+      - /media/cloud-saver/config:/app/config
+    restart: unless-stopped
+```
+
 说明：
 
 - `CLOUDSAVER_USERNAME` / `CLOUDSAVER_PASSWORD` 是网页端和 `cloud189-auto-save` 登录用的账号密码
