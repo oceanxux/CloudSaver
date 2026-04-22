@@ -37,8 +37,8 @@ HDHIVE_API_KEY=
 HDHIVE_TMDB_SEARCH_LIMIT=5
 HDHIVE_RESOURCE_LIMIT=3
 ```
-
-```docker-compose.yml
+## docker-compose.yml
+```
 services:
   cloudsaver:
     image: ghcr.io/oceanxux/cloudsaver:latest
